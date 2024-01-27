@@ -133,7 +133,6 @@ class PrecompDataset(data.Dataset):
         self.loc = '/Users/radhikagupta/Downloads/SOP/rsicd_precomp/'
         self.img_path = '/Users/radhikagupta/Downloads/SOP/RSICD_images/'
         
-        print('Image path is', self.img_path)
         # Captions
         self.captions = []
         self.maxlength = 0
@@ -212,7 +211,7 @@ class PrecompDataset(data.Dataset):
 
 
         caption = []
-        caption.extend([vocab(token) for token in tokens_UNK])
+        caption.extend([vocab(token) for token in tokens_UNK if token!='<unk>'])
         caption = torch.LongTensor(caption)
 
         image = Image.open(self.img_path +'/' +str(self.images[img_id])[2:-1]).convert('RGB')
@@ -335,9 +334,11 @@ def extract_vit_features(data_loader, model, num_images=None):
     return torch.cat(all_features, dim=0), image_ids
 
 # Set the number of images you want to process
-num_images_to_process = 100
+num_images_to_process = 1000
 
 # Extract features from the training loader for the specified number of images
+
+#Calling the extract_vit_features function
 train_features_subset, image_ids_subset = extract_vit_features(train_loader, vit_model, num_images=num_images_to_process)
 
 # Now 'train_features_subset' contains the extracted features for the subset of images
@@ -345,19 +346,59 @@ train_features_subset, image_ids_subset = extract_vit_features(train_loader, vit
 print("Shape of extracted features:", train_features_subset.shape)
 print("Number of image IDs:", len(image_ids_subset))
 
-import matplotlib.pyplot as plt
-from sklearn.decomposition import PCA
-import seaborn as sns
 
-# Assuming 'train_features_subset' contains the extracted features
-# Shape of train_features_subset: (num_images, feature_dim)
+############################################################################
+import torch
+from transformers import BertTokenizer, BertModel
 
-# Apply PCA to reduce the dimensionality to 2 for visualization
-pca = PCA(n_components=2)
-features_2d = pca.fit_transform(train_features_subset.numpy())
+# Load BERT tokenizer
+bert_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
 
-# Create a scatter plot
-plt.figure(figsize=(10, 8))
-sns.scatterplot(x=features_2d[:, 0], y=features_2d[:, 1], hue=image_ids_subset, palette="viridis", legend="full")
-plt.title('PCA Visualization of ViT Features')
-plt.show()
+# Use get_loaders to get train_loader and val_loader
+vocab = Vocabulary()
+opt = {}  # You can customize the options if needed
+train_loader, val_loader = get_loaders(vocab, opt)
+
+# Extract captions from the train_loader
+captions_list = []
+num_sentences_to_process = 1000
+for batch in train_loader:
+    _, captions, _, _ = batch
+    for cap in captions:
+        tokens = [vocab.idx2word[str(idx.item())] for idx in cap]
+        caption_str = ' '.join(tokens)
+        captions_list.append(caption_str)
+        
+        if len(captions_list) >= num_sentences_to_process:
+            break
+
+        # Check if the specified number of sentences has been processed
+        if len(captions_list) >= num_sentences_to_process:
+            break
+
+
+# Tokenize captions using BERT tokenizer
+bert_inputs = bert_tokenizer(captions_list, return_tensors='pt', padding=True, truncation=True, max_length=128)
+
+bert_model = BertModel.from_pretrained('bert-base-uncased')
+
+def extract_bert_features(bert_inputs):
+    
+    # Forward pass through BERT model
+    with torch.no_grad():
+        outputs = bert_model(**bert_inputs)
+
+    # Extract the output embeddings from BERT
+    embeddings = outputs.last_hidden_state
+
+    # You can use the pooled output or any other representation based on your task
+    pooled_output = outputs.pooler_output
+
+    return pooled_output
+
+
+# Extract BERT features for captions
+bert_features = extract_bert_features(bert_inputs)
+
+# Now 'bert_features' contains the BERT embeddings for the captions
+print("Shape of BERT features:", bert_features.shape)
