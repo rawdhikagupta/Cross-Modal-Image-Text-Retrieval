@@ -4,6 +4,10 @@ import argparse
 import os
 import json
 import multiprocessing
+import torch.nn as nn
+import torch.nn.init
+import torch.nn.functional as F
+import torch.optim as optim
 
 annotations = {
     'rsicd_precomp': ['train_caps.txt', 'val_caps.txt', 'test_caps.txt'],
@@ -112,14 +116,13 @@ if __name__ == '__main__':
 
 
 ##############################################################################################
-
+#DATA PREPROCESSING 
 import torch
 import torch.utils.data as data
 import torchvision.transforms as transforms
 import os
 import nltk
 import numpy as np
-import yaml
 import argparse
 from PIL import Image
 
@@ -138,7 +141,7 @@ class PrecompDataset(data.Dataset):
         self.maxlength = 0
 
         # local features
-        #local_features = np.load('/Users/radhikagupta/Downloads/SOP/rsicd_local.npy', allow_pickle=True)
+        local_features = np.load('/Users/radhikagupta/Downloads/SOP/rsicd_local.npy', allow_pickle=True)[()]
 
         if data_split != 'test':
             with open(self.loc+'%s_caps_verify.txt' % data_split, 'rb') as f:
@@ -146,14 +149,14 @@ class PrecompDataset(data.Dataset):
                     self.captions.append(line.strip())
 
             self.images = []
-            #self.local_adj = []
-            #self.local_rep = []
+            self.local_adj = []
+            self.local_rep = []
             with open(self.loc + '%s_filename_verify.txt' % data_split, 'rb') as f:
                 for line in f:
                     # local append
                     filename = str(line.strip())[2:-1].split(".")[0] + ".txt"
-                    #self.local_adj.append(np.array(local_features['adj_matrix'][filename]))
-                    #self.local_rep.append(np.array(local_features['local_rep'][filename]))
+                    self.local_adj.append(np.array(local_features['adj_matrix'][filename]))
+                    self.local_rep.append(np.array(local_features['local_rep'][filename]))
 
                     self.images.append(line.strip())
         else:
@@ -162,14 +165,14 @@ class PrecompDataset(data.Dataset):
                     self.captions.append(line.strip())
 
             self.images = []
-            #self.local_adj = []
-            #self.local_rep = []
+            self.local_adj = []
+            self.local_rep = []
             with open(self.loc + '%s_filename.txt' % data_split, 'rb') as f:
                 for line in f:
                     # local append
                     filename = str(line.strip())[2:-1].split(".")[0] + ".txt"
-                    #self.local_adj.append(np.array(local_features['adj_matrix'][filename]))
-                    #self.local_rep.append(np.array(local_features['local_rep'][filename]))
+                    self.local_adj.append(np.array(local_features['adj_matrix'][filename]))
+                    self.local_rep.append(np.array(local_features['local_rep'][filename]))
 
                     self.images.append(line.strip())
 
@@ -218,11 +221,11 @@ class PrecompDataset(data.Dataset):
         image = self.transform(image)  # torch.Size([3, 256, 256])
 
         # local
-        #local_rep =  torch.from_numpy(self.local_rep[img_id]).type(torch.float32)
-        #local_adj = torch.from_numpy(self.local_adj[img_id]).type(torch.float32)
+        local_rep =  torch.from_numpy(self.local_rep[img_id]).type(torch.float32)
+        local_adj = torch.from_numpy(self.local_adj[img_id]).type(torch.float32)
 
 
-        return image, caption, tokens_UNK, index, img_id
+        return image, caption, tokens_UNK, index, img_id, local_rep, local_adj
 
     def __len__(self):
         return self.length
@@ -232,13 +235,13 @@ def collate_fn(data):
 
     # Sort a data list by caption length
     data.sort(key=lambda x: len(x[4]) if isinstance(x[4], list) else 0, reverse=True)
-    images, captions, tokens, ids, img_ids = zip(*data)
+    images, captions, tokens, ids, img_ids,local_rep,local_adj = zip(*data)
 
     # Merge images (convert tuple of 3D tensor to 4D tensor)
     images = torch.stack(images, 0)
 
-    #local_rep = torch.stack(local_rep, 0)
-    #local_adj = torch.stack(local_adj, 0)
+    local_rep = torch.stack(local_rep, 0)
+    local_adj = torch.stack(local_adj, 0)
 
     # Merge captions (convert tuple of 1D tensor to 2D tensor)
     lengths = [len(cap) for cap in captions]
@@ -249,7 +252,7 @@ def collate_fn(data):
 
     lengths = [l if l !=0 else 1 for l in lengths]
 
-    return images, targets, lengths, ids
+    return images, targets, lengths, ids, local_rep, local_adj
 
 
 def get_precomp_loader(data_split, vocab, batch_size=100,
@@ -277,8 +280,9 @@ def get_test_loader(vocab, opt):
     return test_loader
 
 
-import torch
-import torch.nn as nn
+#################################################################
+#Creating A Model 
+
 from torchvision import models, transforms
 from vit_pytorch import ViT
 
@@ -304,84 +308,20 @@ class ViTFeatureExtractor(nn.Module):
 
 # Initialize ViT model
 vit_model = ViTFeatureExtractor()
-
+print("Checkpoint 1 ******************************************:")
 vocab = Vocabulary()
 vocab_path = '/Users/radhikagupta/Downloads/SOP/rsitmd_splits_vocab.json'  # Update with the correct path
 vocab = deserialize_vocab(vocab_path)
 
-opt = {}  
-train_loader, val_loader = get_loaders(vocab, opt)
-
-def extract_vit_features(data_loader, model, num_images=None):
-    model.eval()
-    all_features = []
-    image_ids = []
-
-    with torch.no_grad():
-        for batch_idx, batch in enumerate(data_loader):
-            images, _, _,img_ids = batch  # assuming the image IDs are present in the last element of the batch tuple
-            features = model(images)
-            all_features.append(features)
-            image_ids.extend(img_ids)
-
-            # Check if the specified number of images has been processed
-            if num_images is not None and len(all_features) * images.size(0) >= num_images:
-                remaining_images = num_images - (len(all_features) - 1) * images.size(0)
-                all_features[-1] = all_features[-1][:remaining_images]
-                image_ids = image_ids[:num_images]
-                break  # Stop processing more batches
-
-    return torch.cat(all_features, dim=0), image_ids
-
-# Set the number of images you want to process
-num_images_to_process = 1000
-
-# Extract features from the training loader for the specified number of images
-
-#Calling the extract_vit_features function
-train_features_subset, image_ids_subset = extract_vit_features(train_loader, vit_model, num_images=num_images_to_process)
-
-# Now 'train_features_subset' contains the extracted features for the subset of images
-# and 'image_ids_subset' contains the corresponding image IDs
-print("Shape of extracted features:", train_features_subset.shape)
-print("Number of image IDs:", len(image_ids_subset))
-
-
-############################################################################
-import torch
+#Importing BERT Model 
 from transformers import BertTokenizer, BertModel
-
 # Load BERT tokenizer
 bert_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+opt = {}
 
-# Use get_loaders to get train_loader and val_loader
-vocab = Vocabulary()
-opt = {}  # You can customize the options if needed
-train_loader, val_loader = get_loaders(vocab, opt)
-
-# Extract captions from the train_loader
-captions_list = []
-num_sentences_to_process = 1000
-for batch in train_loader:
-    _, captions, _, _ = batch
-    for cap in captions:
-        tokens = [vocab.idx2word[str(idx.item())] for idx in cap]
-        caption_str = ' '.join(tokens)
-        captions_list.append(caption_str)
-        
-        if len(captions_list) >= num_sentences_to_process:
-            break
-
-        # Check if the specified number of sentences has been processed
-        if len(captions_list) >= num_sentences_to_process:
-            break
-
-
-# Tokenize captions using BERT tokenizer
-bert_inputs = bert_tokenizer(captions_list, return_tensors='pt', padding=True, truncation=True, max_length=128)
-
+#Initialising BERT Model
 bert_model = BertModel.from_pretrained('bert-base-uncased')
-
+print("Checkpoint 2 ******************************************:")
 def extract_bert_features(bert_inputs):
     
     # Forward pass through BERT model
@@ -397,8 +337,208 @@ def extract_bert_features(bert_inputs):
     return pooled_output
 
 
-# Extract BERT features for captions
-bert_features = extract_bert_features(bert_inputs)
+# Use get_loaders to get train_loader and val_loader  
+train_loader, val_loader = get_loaders(vocab, opt)
+print("Checkpoint 3 ******************************************:")
+num_images_to_process = 10
+count = 0
+for batch in train_loader:
+    images, captions, _, img_ids,_,_ = batch
+    # Set models to evaluation mode
+    vit_model.eval()
+    bert_model.eval()
 
-# Now 'bert_features' contains the BERT embeddings for the captions
-print("Shape of BERT features:", bert_features.shape)
+    # ViT feature extraction
+    with torch.no_grad():
+        vit_features = vit_model(images)
+
+    # BERT feature extraction
+    captions_list = []
+    for cap in captions:
+        
+        tokens = [vocab.idx2word[str(idx.item())] for idx in cap if idx.item() != 0]
+        caption_str = ' '.join(tokens)
+        captions_list.append(caption_str)
+
+    bert_inputs = bert_tokenizer(captions_list, return_tensors='pt', padding=True, truncation=True, max_length=128)
+    
+    with torch.no_grad():
+        print("Checkpoint 4 ******************************************:")
+        bert_features = extract_bert_features(bert_inputs)
+        print("Checkpoint 5 ******************************************:")
+        
+    count += len(images)
+    if count >= num_images_to_process:
+        break
+# Now 'vit_features' contains the ViT embeddings for images
+# and 'bert_features' contains the BERT embeddings for captions
+
+print("Image Features Shape:", vit_features.shape)
+print("Caption Features Shape:", bert_features.shape)
+
+#Defining a Cross Attention Model (code used from the AMFMN paper)
+
+class CrossAttention(nn.Module):
+
+    def __init__(self, opt={}):
+        super(CrossAttention, self).__init__()
+
+        self.att_type = "soft_att"
+        dim = 512
+
+        if self.att_type == "soft_att":
+            self.cross_attention = nn.Sequential(
+                nn.Linear(dim, dim),
+                nn.Sigmoid()
+            )
+        elif self.att_type == "fusion_att":
+            self.cross_attention_fc1 = nn.Sequential(
+                nn.Linear(2*dim, dim),
+                nn.Sigmoid()
+            )
+            self.cross_attention_fc2 = nn.Sequential(
+                nn.Linear(2*dim, dim),
+            )
+            self.cross_attention = lambda x:self.cross_attention_fc1(x)*self.cross_attention_fc2(x)
+
+        elif self.att_type == "similarity_att":
+            self.fc_visual = nn.Sequential(
+                nn.Linear(dim, dim),
+            )
+            self.fc_text = nn.Sequential(
+                nn.Linear(dim, dim),
+            )
+        else:
+            raise Exception
+
+    def forward(self, visual, text):
+        batch_v = visual.shape[0]
+        batch_t = text.shape[0]
+
+        if self.att_type == "soft_att":
+            visual_gate = self.cross_attention(visual)
+
+            # mm
+            visual_gate = visual_gate.unsqueeze(dim=1).expand(-1, batch_t, -1)
+            text = text.unsqueeze(dim=0).expand(batch_v, -1, -1)
+
+            return visual_gate*text
+
+        elif self.att_type == "fusion_att":
+            visual = visual.unsqueeze(dim=1).expand(-1, batch_t, -1)
+            text = text.unsqueeze(dim=0).expand(batch_v, -1, -1)
+
+            fusion_vec = torch.cat([visual,text], dim=-1)
+
+            return self.cross_attention(fusion_vec)
+        elif self.att_type == "similarity_att":
+            visual = self.fc_visual(visual)
+            text = self.fc_text(text)
+
+            visual = visual.unsqueeze(dim=1).expand(-1, batch_t, -1)
+            text = text.unsqueeze(dim=0).expand(batch_v, -1, -1)
+
+            sims = visual*text
+            return F.sigmoid(sims) * text
+        
+#Initialising the cross attention model 
+cross_attention_model = CrossAttention()
+
+
+# Defining a simple feedforward neural network (FFN)
+class FFN(nn.Module):
+    def __init__(self, input_dim, output_dim):
+        super(FFN, self).__init__()
+        self.fc = nn.Linear(input_dim, output_dim)
+
+    def forward(self, x):
+        return self.fc(x)
+
+#Reshaping the vit and BERT features using the FFN 
+
+vit_ffn = FFN(vit_features.shape[1], 512)
+vit_features_reshaped = vit_ffn(vit_features)
+
+bert_ffn = FFN(bert_features.shape[1], 512)
+bert_features_reshaped = bert_ffn(bert_features)
+
+print("AFTER RESHAPING ______________:")
+
+print("Image Features Shape:", vit_features_reshaped.shape)
+print("Caption Features Shape:", bert_features_reshaped.shape)
+
+import torch.nn.functional as F
+
+# Apply L2 normalization to VIT and BERT features, The p=2 argument specifies L2 normalization.
+vit_features_normalized = F.normalize(vit_features_reshaped, p=2, dim=1)
+bert_features_normalized = F.normalize(bert_features_reshaped, p=2, dim=1)
+
+# Apply cross-attention to vit_features
+vit_features_with_attention = cross_attention_model(vit_features_reshaped, bert_features_reshaped)
+
+# Apply cross-attention to bert_features
+bert_features_with_attention = cross_attention_model(bert_features_reshaped, vit_features_reshaped)
+
+# def l2norm(X, dim, eps=1e-8):
+#     """L2-normalize columns of X
+#     """
+#     norm = torch.pow(X, 2).sum(dim=dim, keepdim=True).sqrt() + eps
+#     X = torch.div(X, norm)
+#     return X
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class GCN(nn.Module):
+    def __init__(self , dim_in=20 , dim_out=20, dim_embed = 512):
+        super(GCN,self).__init__()
+
+        self.fc1 = nn.Linear(dim_in ,dim_in,bias=False)
+        self.fc2 = nn.Linear(dim_in,dim_in//2,bias=False)
+        self.fc3 = nn.Linear(dim_in//2,dim_out,bias=False)
+
+        self.out = nn.Linear(dim_out * dim_in, dim_embed)
+
+    def forward(self, A, X):
+        batch, objects, rep = X.shape[0], X.shape[1], X.shape[2]
+
+        # first layer
+        tmp = (A.bmm(X)).view(-1, rep)
+        X = F.relu(self.fc1(tmp))
+        X = X.view(batch, -1, X.shape[-1])
+
+        # second layer
+        tmp = (A.bmm(X)).view(-1, X.shape[-1])
+        X = F.relu(self.fc2(tmp))
+        X = X.view(batch, -1, X.shape[-1])
+
+        # third layer
+        tmp = (A.bmm(X)).view(-1, X.shape[-1])
+        X = F.relu(self.fc3(tmp))
+        X = X.view(batch, -1)
+
+        # Output layer
+        X = self.out(X)
+
+        return F.normalize(X, p=2, dim=-1)  # L2 normalization of the output
+
+count = 0; 
+for batch in train_loader:
+    images, _, _, _,local_rep, local_adj = batch
+    # Instantiate GCN model
+    gcn_model = GCN(dim_in=20, dim_out=20, dim_embed=512)
+    print("Checkpoint 6 ******************************************:")
+
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(gcn_model.parameters(), lr=0.01)
+    num_epochs = 1
+
+    print("Checkpoint 7 ******************************************:")
+
+    gcn_features = gcn_model(local_rep, local_adj)
+    count += len(images)
+    if count >= num_images_to_process:
+        break
+    
+print("Local Features(After GCN) shape", gcn_features.shape)
