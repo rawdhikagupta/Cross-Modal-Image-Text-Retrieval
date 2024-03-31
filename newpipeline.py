@@ -304,7 +304,9 @@ class ViTFeatureExtractor(nn.Module):
         )
 
     def forward(self, x):
-        return self.transformer(x)
+        # Extract embeddings from ViT model
+        embeddings = self.transformer(x)['last_hidden_state']
+        return embeddings
 
 # Initialize ViT model
 vit_model = ViTFeatureExtractor()
@@ -334,7 +336,7 @@ def extract_bert_features(bert_inputs):
     # You can use the pooled output or any other representation based on your task
     pooled_output = outputs.pooler_output
 
-    return pooled_output
+    return embeddings
 
 
 # Use get_loaders to get train_loader and val_loader  
@@ -523,22 +525,63 @@ class GCN(nn.Module):
 
         return F.normalize(X, p=2, dim=-1)  # L2 normalization of the output
 
-count = 0; 
-for batch in train_loader:
-    images, _, _, _,local_rep, local_adj = batch
-    # Instantiate GCN model
-    gcn_model = GCN(dim_in=20, dim_out=20, dim_embed=512)
-    print("Checkpoint 6 ******************************************:")
 
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(gcn_model.parameters(), lr=0.01)
-    num_epochs = 1
 
-    print("Checkpoint 7 ******************************************:")
+#Extracting local features using GCN
 
-    gcn_features = gcn_model(local_rep, local_adj)
-    count += len(images)
-    if count >= num_images_to_process:
-        break
+# count = 0 
+# for batch in train_loader:
+#     images, _, _, _,local_rep, local_adj = batch
+#     # Instantiate GCN model
+#     gcn_model = GCN(dim_in=20, dim_out=20, dim_embed=512)
+#     print("Checkpoint 6 ******************************************:")
+
+#     criterion = nn.CrossEntropyLoss()
+#     optimizer = optim.Adam(gcn_model.parameters(), lr=0.01)
+#     num_epochs = 1
+
+#     print("Checkpoint 7 ******************************************:")
+
+#     gcn_features = gcn_model(local_rep, local_adj)
+#     count += len(images)
+#     if count >= num_images_to_process:
+#         break
     
+gcn_model = GCN(dim_in=20, dim_out=20, dim_embed=512)
+criterion = nn.CrossEntropyLoss()
+optimizer = optim.Adam(gcn_model.parameters(), lr=0.01)
+
+# Set the number of epochs
+num_epochs = 20
+
+# Iterate over the dataset for the specified number of epochs
+for epoch in range(num_epochs):
+    # Set model to training mode
+    gcn_model.train()
+
+    # Initialize progress bar
+    progress_bar = tqdm(train_loader, desc=f'Epoch {epoch + 1}/{num_epochs}', unit='batch')
+
+    # Iterate over batches in the training data
+    count = 0
+    for batch in progress_bar:
+        # Extract data from batch
+        images, _, _, _, local_rep, local_adj = batch
+
+        # Forward pass
+        optimizer.zero_grad()  # Zero gradients
+        gcn_features = gcn_model(local_rep, local_adj)
+        count += len(images)
+        if count >= num_images_to_process:
+            break
+
+        # Compute loss
+        loss = criterion(gcn_features, targets)  # Assuming targets are available
+
+        # Backward pass and optimization step
+        loss.backward()
+        optimizer.step()
+
+        # Update progress bar description
+        progress_bar.set_postfix(loss=loss.item())
 print("Local Features(After GCN) shape", gcn_features.shape)
