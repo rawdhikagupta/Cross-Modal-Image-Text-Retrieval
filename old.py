@@ -402,3 +402,71 @@ bert_features = extract_bert_features(bert_inputs)
 
 # Now 'bert_features' contains the BERT embeddings for the captions
 print("Shape of BERT features:", bert_features.shape)
+
+ # make vocab
+    vocab = deserialize_vocab(options['dataset']['vocab_path'])
+    vocab_word = sorted(vocab.word2idx.items(), key=lambda x: x[1], reverse=False)
+    vocab_word = [tup[0] for tup in vocab_word]
+
+    # Create dataset, model, criterion and optimizer
+    train_loader, val_loader = data.get_loaders(vocab, options)
+    
+    model = models.factory(options['model'],
+                           vocab_word,
+                           cuda=True,
+                           data_parallel=False)
+
+    optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()),lr=0.0002)
+    
+
+    print('Model has {} parameters'.format(utils.params_count(model)))
+    # Train the Model
+    best_rsum = 0
+    best_score = ""
+    
+    print('Training has begin')
+
+    for epoch in range(start_epoch, options['optim']['epochs']):
+
+        utils.adjust_learning_rate(options, optimizer, epoch)
+
+        # train for one epoch
+        print("Training for the {}th epoch".format(epoch))
+        engine.train(train_loader, model, optimizer, epoch, opt=options)
+
+        #Saving the model parameters to H5 file 
+        #model.save("RSITMD_model.h5") Can't do this for Pytorch models. 
+        
+        torch.save(model.state_dict(), "RSITMD_model.pth")
+        print("Model is saved!") 
+        
+        # evaluate on validation set
+        print("Now evaluating on the validation set")
+        rsum, all_scores = engine.validate(val_loader, model)
+
+        is_best = rsum > best_rsum
+        if is_best:
+            best_score = all_scores
+        best_rsum = max(rsum, best_rsum)
+
+        # save ckpt
+        utils.save_checkpoint(
+                {
+                'epoch': epoch + 1,
+                'arch': 'baseline',
+                'model': model.state_dict(),
+                'best_rsum': best_rsum,
+                'options': options,
+                'Eiters': model.Eiters,
+            },
+                is_best,
+                filename='ckpt_{}_{}_{:.2f}.pth.tar'.format(options['model']['name'] ,epoch, best_rsum),
+                prefix=options['logs']['ckpt_save_path'],
+                model_name=options['model']['name']
+            )
+
+        print("Current {}th fold.".format(options['k_fold']['current_num']))
+        print("Now  score:")
+        print(all_scores)
+        print("Best score:")
+        print(best_score)
